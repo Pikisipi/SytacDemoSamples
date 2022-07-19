@@ -1,0 +1,66 @@
+#Build
+name: $(TeamProject)_$(SourceBranch)_$(BuildID)_$(Date:yyyyMMdd)
+
+resources:
+  repositories:
+    - repository: Sytac
+      type: git
+      name: sytac/sytac
+      trigger: none
+
+  pipelines:
+    - pipeline: AngularCI
+      source: 'CI/AngularCI'
+      trigger:
+        branches:
+          include: 
+          - main
+
+variables:
+  app.Ref: $[ resources.repositories['app'].ref ]
+  app.IsDevelop: $[contains(variables['app.ref'], 'develop')]
+  app.IsMaster: $[contains(variables['app.ref'], 'master')]
+  app.IsRelease: $[contains(variables['app.ref'], 'release')]
+  app.IsHotfix: $[contains(variables['app.ref'], 'hotfix')]
+  app.Repository: $[ resources.repositories['app'].name ]
+
+pool:
+  name: Home
+#  vmImage: 'windows-latest'
+
+jobs:
+  - job: Deploy
+    steps:
+
+      - task: UniversalPackages@0
+        displayName: Universal Download
+        inputs:
+          command: download
+          downloadDirectory: '$(Build.ArtifactStagingDirectory)'
+          vstsFeed: 'Sytac/Demo'
+          vstsFeedPackage: 'demo-package' # convert to top-level variable
+          vstsPackageVersion: '*'
+          verbosity: 'information'
+
+        # Deploy the Angular Web App Artifacts
+      - task: AzureWebApp@1
+        inputs:
+          azureSubscription:  '$(AzureServiceConnectionName)'  # service connection
+          appName: '$(AppServiceName)'
+          package: '$(Build.ArtifactStagingDirectory)/Demo.zip'
+          appType: webApp
+
+      - task: AzureAppServiceSettings@1
+        displayName: AzureAppServiceSettings
+        inputs:
+          azureSubscription: '$(AzureServiceConnectionName)'  # service connection
+          appName: '$(AppServiceName)'
+          resourceGroupName: '$(ResourceGroupName)'
+          appSettings: |
+            [
+              {
+                "name": "Version",
+                "value": "Latest",
+                "slotSetting": false
+              }
+            ]

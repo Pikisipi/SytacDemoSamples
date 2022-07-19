@@ -1,0 +1,162 @@
+#Build
+name: $(TeamProject)_$(SourceBranch)_$(BuildID)_$(Date:yyyyMMdd)
+
+resources:
+  repositories:
+    - repository: Sytac
+      type: git
+      name: sytac/sytac # the repo containing the app solution code to build
+      trigger:
+        batch: true
+        branches:
+          include:
+            - main
+      pr:
+        branches:
+          include:
+            - bogus
+
+pool:
+#  name: Home
+  vmImage: 'windows-latest'
+
+jobs:
+  - job: Build_and_Deliver
+
+    steps:
+      - checkout: self
+        submodules: recursive
+
+      # Install Angular
+      - script: |
+          npm install -g @angular/cli@12.1
+        displayName: 'Install Angular'
+
+      # Install node.js https://nodejs.org/en/download/releases/
+      - task: NodeTool@0
+        inputs:
+          versionSpec: '14.x'
+        displayName: 'Install Node.js'
+
+      #Install Dependencies / Nodes / NPM Packages
+      - task: Npm@1
+        displayName: 'Install NPM Dependencies'
+        inputs:
+          command: install
+          workingDir: $(System.DefaultWorkingDirectory)/Source/angular
+
+      - task: SonarCloudPrepare@1
+        displayName: 'Prepare SonarCloud'
+        inputs:
+          SonarCloud: $(SC)
+          organization: 'sytacdemo'
+          scannerMode: 'CLI'
+          cliProjectKey: $(PK)
+          cliProjectName: $(PN)
+          cliSource: '.'
+          configMode: 'manual'
+          extraProperties: |
+            sonar.organization=sytacdemo
+            sonar.projectKey=$(PK)
+            sonar.sources=.
+            sonar.tests=.
+            sonar.inclusions=**\Source\angular\**
+            sonar.exclusions=**/*.spec.ts,**/*test.ts,**/*.js
+            sonar.test.inclusions=**/*.spec.ts,**/*test.ts
+#            sonar.coverage.exclusions=**/*.js,src/main.ts,src/polyfills.ts,**/*environment*.ts,**/*module.ts
+#            sonar.javascript.lcov.reportPaths=$(System.DefaultWorkingDirectory)/Source/angular/coverage/lcov.info
+        
+      # NPM Build
+      - script: |
+          cd "$(System.DefaultWorkingDirectory)/Source/angular"
+          npm run build
+        displayName: 'Build dist'
+        condition: succeededOrFailed() 
+
+      # NPM Test
+      - script: |
+          cd "$(System.DefaultWorkingDirectory)/Source/angular"
+          npm i karma-junit-reporter
+        displayName: 'Add JUNIT'
+        condition: succeededOrFailed()
+
+      # NPM Test
+      - script: |
+          cd "$(System.DefaultWorkingDirectory)/Source/angular"
+          npm i karma-coverage
+        displayName: 'Add Karma Code Coverage'        
+        condition: succeededOrFailed()
+
+      # NPM Test
+      - script: |
+          cd "$(System.DefaultWorkingDirectory)/Source/angular"
+          npm run ng test -- --watch=false --code-coverage
+        displayName: 'Karma Test'
+        condition: succeededOrFailed()
+
+      # SonarCloud scanning
+      - task: SonarCloudAnalyze@1
+        displayName: Analyze SonarCloud
+        condition: succeededOrFailed()
+#        condition: and(ne(variables['PKAngular'], ''), succeeded(), or( eq(variables['IsMaster'], true), eq(variables['IsHotfix'], true), eq(variables['IsDevelop'], true), eq(variables['IsRelease'], true) ), ne(variables['Build.Reason'], 'PullRequest'))
+
+      # SonarCloud publishing
+      - task: SonarCloudPublish@1
+        displayName: Publish SonarCloud
+        inputs:
+          pollingTimeoutSec: '600'
+        condition: succeededOrFailed()
+#        condition: and(ne(variables['PKAngular'], ''), succeeded(), or( eq(variables['IsMaster'], true), eq(variables['IsHotfix'], true), eq(variables['IsDevelop'], true), eq(variables['IsRelease'], true) ), ne(variables['Build.Reason'], 'PullRequest'))
+
+      - task: PublishTestResults@2
+        displayName: 'Publish unit test results'
+        condition: succeededOrFailed()
+        inputs:
+          searchFolder: $(System.DefaultWorkingDirectory)/Source/angular/testresults/junit
+          testRunTitle: Angular
+          testResultsFormat: JUnit
+          testResultsFiles: "**/unit-test-result.xml"
+
+      - task: PublishCodeCoverageResults@1
+        inputs:
+          codeCoverageTool: 'Cobertura'
+          summaryFileLocation: 'C:/agent/_work/1/s/Source/angular/testresults/coverage/code-coverage.xml'
+        condition: succeededOrFailed()
+
+  # Zip up the package
+      - task: ArchiveFiles@2
+        displayName: 'Zip the publish output'
+        inputs:
+          rootFolderOrFile: '$(System.DefaultWorkingDirectory)/Source/angular/dist/angular/'
+          includeRootFolder: false
+          archiveType: 'zip'
+          archiveFile: '$(Build.ArtifactStagingDirectory)/Demo.zip'
+          replaceExistingArchive: true
+        condition: succeededOrFailed()
+#        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))
+
+# Save to Universal Artifacts
+      - task: UniversalPackages@0
+        displayName: Universal Publish
+        inputs:
+          command: publish
+          publishDirectory: '$(Build.ArtifactStagingDirectory)'
+          vstsFeedPublish: 'Sytac/Demo'
+          vstsFeedPackagePublish: 'demo-package'
+          packagePublishDescription: 'A test package'
+        condition: succeededOrFailed()
+#          publishPackageMetadata: true
+#          versionOption: 'custom'
+#          versionPublish: $(NextVersion)
+#          verbosity: 'information'
+#        condition: and(succeeded(), ne(variables['Build.Reason'], 'PullRequest'))          
+
+# Trigger the CD Pipeline accordingly, once the CI Pipeline has finished sucefully.
+      - powershell: |
+          Write-Output "Login to AzDO"
+          az devops login --organization $(org)
+          az pipelines build queue --organization $(org) --project $(prj) --definition-id $(Definition)
+        displayName: CD Pipeline Queue
+        condition: succeededOrFailed()
+        env:
+          AZURE_DEVOPS_EXT_PAT: $(PAT)
